@@ -248,7 +248,6 @@ Recommendation behavior:
 - If some requested skills do not have exact assessment coverage,
   explain that naturally and recommend the closest alternatives.
 - Keep responses compact and recruiter-focused.
-- If none of the assesment is recommended in two turns then recommend at least one assessment in third turn which is a closes match.
 
 Formatting:
 - If recommendations are provided:
