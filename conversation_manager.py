@@ -1,4 +1,5 @@
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -34,7 +35,6 @@ def get_last_user_message(messages):
     for msg in reversed(messages):
 
         if msg["role"] == "user":
-
             return msg["content"]
 
     return ""
@@ -65,7 +65,11 @@ def is_conversation_complete(user_text):
 
         "done",
 
-        "finalize"
+        "finalize",
+
+        "confirmed",
+
+        "lock it in"
     ]
 
     return any(
@@ -93,15 +97,25 @@ def filter_recommendations(results):
         "development feedback"
     ]
 
+    seen = set()
+
     for item in results:
 
         name = item.get(
             "name",
             ""
-        ).lower()
+        )
+
+        if not name:
+            continue
+
+        if name.lower() in seen:
+            continue
+
+        seen.add(name.lower())
 
         if any(
-            term in name
+            term in name.lower()
             for term in noisy_terms
         ):
             continue
@@ -158,13 +172,12 @@ def detect_missing_skill_coverage(
     for skill in user_skills:
 
         if skill not in recommendation_text:
-
             missing.append(skill)
 
     return missing
 
 # =========================================================
-# FORMAT CANDIDATES FOR PROMPT
+# FORMAT RECOMMENDATIONS
 # =========================================================
 
 def format_candidates_for_prompt(results):
@@ -204,7 +217,7 @@ URL:
     return "\n\n".join(formatted)
 
 # =========================================================
-# GENERATE LLM RESPONSE
+# GENERATE RESPONSE
 # =========================================================
 
 def generate_agent_response(
@@ -234,35 +247,37 @@ You are an expert SHL assessment recommendation consultant.
 Guidelines:
 - Help recruiters choose suitable SHL assessments.
 - Maintain conversational continuity across turns.
-- Be concise, confident, and consultative.
-- Speak naturally and directly.
-- Avoid repetitive or overly polite assistant phrasing.
-- Ask clarification questions only when necessary.
-- If enough context exists, provide recommendations confidently.
-- Use only the retrieved recommendations.
+- Speak like a recruiter consultant.
+- Be concise, grounded, and confident.
+- Avoid generic AI-style summaries.
+- Avoid marketing language.
 - Never invent assessments or URLs.
+- Use only retrieved recommendations.
 
-Recommendation behavior:
-- Prefer foundational assessments before related reports when relevant.
-- Explain briefly why the recommendations fit the role or hiring goal.
-- If some requested skills do not have exact assessment coverage,
-  explain that naturally and recommend the closest alternatives.
-- Keep responses compact and recruiter-focused.
+Behavior:
+- Ask clarification questions only when ambiguity materially affects recommendations.
+- Avoid premature recommendations.
+- Prefer foundational assessments before related reports.
+- Explain instrument vs report distinctions naturally.
+- Mention catalog limitations naturally when relevant.
+
+IMPORTANT:
+- If recommendations are empty:
+  - do NOT invent assessments.
+  - do NOT hallucinate prior recommendations.
 
 Formatting:
-- If recommendations are provided:
-  - Show them as a numbered list.
-  - Include:
-    - Name
-    - Document Type
-    - Duration
-    - URL
+- Use compact numbered recommendations.
+- Include:
+  - Name
+  - Document Type
+  - Duration
+  - URL
 
-- If clarification is needed:
-  - Ask a short natural follow-up question.
-
-- If the conversation is complete:
-  - Briefly summarize the recommendation logic and conclude professionally.
+- If conversation_complete=True:
+  - confirm shortlist naturally.
+  - briefly explain recommendation logic.
+  - avoid generic summaries.
 """
 
     # =====================================================
@@ -327,7 +342,7 @@ Generate the assistant response.
         return f"Error generating response: {str(e)}"
 
 # =========================================================
-# MAIN CONVERSATION HANDLER
+# MAIN HANDLER
 # =========================================================
 
 def handle_conversation(messages):
@@ -354,9 +369,48 @@ def handle_conversation(messages):
     # CONVERSATION COMPLETE
     # =====================================================
 
-    if is_conversation_complete(
+    conversation_complete = is_conversation_complete(
         last_user_message
-    ):
+    )
+
+    # =====================================================
+    # FINAL CONFIRMATION FLOW
+    # =====================================================
+
+    if conversation_complete:
+
+        # -------------------------------------------------
+        # RE-RUN RETRIEVAL USING FULL CONVERSATION
+        # -------------------------------------------------
+
+        recommendations = recommend(
+
+            query_data["search_query"],
+
+            n_results=7
+        )
+
+        # -------------------------------------------------
+        # FILTER RESULTS
+        # -------------------------------------------------
+
+        recommendations = filter_recommendations(
+            recommendations
+        )
+
+        # -------------------------------------------------
+        # DETECT COVERAGE GAPS
+        # -------------------------------------------------
+
+        missing_skills = detect_missing_skill_coverage(
+
+            state,
+            recommendations
+        )
+
+        # -------------------------------------------------
+        # GENERATE FINAL RESPONSE
+        # -------------------------------------------------
 
         response = generate_agent_response(
 
@@ -364,9 +418,9 @@ def handle_conversation(messages):
 
             state=state,
 
-            recommendations=None,
+            recommendations=recommendations,
 
-            missing_skills=None,
+            missing_skills=missing_skills,
 
             clarification_needed=False,
 
@@ -375,11 +429,15 @@ def handle_conversation(messages):
             conversation_complete=True
         )
 
+        # -------------------------------------------------
+        # RETURN FINAL RESPONSE
+        # -------------------------------------------------
+
         return {
 
             "reply": response,
 
-            "recommendations": None,
+            "recommendations": recommendations,
 
             "end_of_conversation": True
         }
@@ -390,10 +448,6 @@ def handle_conversation(messages):
 
     if query_data["needs_clarification"]:
 
-        # -------------------------------------------------
-        # LEADERSHIP FLOW
-        # -------------------------------------------------
-
         if state["role"] == "leadership":
 
             if not state["seniority"]:
@@ -401,9 +455,12 @@ def handle_conversation(messages):
                 return {
 
                     "reply":
-                    "Happy to help narrow that down. Who is this meant for?",
+                    (
+                        "Happy to help narrow that down. "
+                        "Who is this meant for?"
+                    ),
 
-                    "recommendations": None,
+                    "recommendations": [],
 
                     "end_of_conversation": False
                 }
@@ -412,20 +469,17 @@ def handle_conversation(messages):
 
                 "reply":
                 (
-                    "For senior leadership roles, OPQ32r is commonly used "
-                    "to assess leadership style, influencing approach, "
-                    "and workplace behaviour.\n\n"
-                    "Is this for selection or leadership development?"
+                    "For such roles, the OPQ32r is the right "
+                    "instrument — it measures leadership style, "
+                    "influencing approach, and workplace behaviour.\n\n"
+                    "One question before I commit to a report format: "
+                    "is this for selection or leadership development?"
                 ),
 
-                "recommendations": None,
+                "recommendations": [],
 
                 "end_of_conversation": False
             }
-
-        # -------------------------------------------------
-        # DEFAULT FLOW
-        # -------------------------------------------------
 
         response = generate_agent_response(
 
@@ -433,7 +487,7 @@ def handle_conversation(messages):
 
             state=state,
 
-            recommendations=None,
+            recommendations=[],
 
             missing_skills=None,
 
@@ -450,13 +504,13 @@ def handle_conversation(messages):
 
             "reply": response,
 
-            "recommendations": None,
+            "recommendations": [],
 
             "end_of_conversation": False
         }
 
     # =====================================================
-    # RETRIEVE RECOMMENDATIONS
+    # RETRIEVE
     # =====================================================
 
     recommendations = recommend(
@@ -475,7 +529,7 @@ def handle_conversation(messages):
     )
 
     # =====================================================
-    # DETECT COVERAGE GAPS
+    # DETECT GAPS
     # =====================================================
 
     missing_skills = detect_missing_skill_coverage(
